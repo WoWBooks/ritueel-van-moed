@@ -155,6 +155,39 @@
     opacity: 1;
   }
 
+  /* Startknop */
+  .btn-start {
+    font-family: 'Cinzel', serif;
+    font-size: 0.82rem;
+    font-weight: 400;
+    letter-spacing: 0.26em;
+    text-transform: uppercase;
+    color: var(--gold);
+    background: transparent;
+    border: 1px solid var(--gold);
+    padding: 0.85rem 2.2rem;
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+    opacity: 0;
+    animation: fadeUp 1.2s ease 1.8s forwards;
+    transition: color 0.4s, border-color 0.4s, box-shadow 0.4s;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .btn-start:hover,
+  .btn-start:active {
+    border-color: var(--gold-light);
+    box-shadow: 0 0 18px rgba(201,168,76,0.18), inset 0 0 12px rgba(201,168,76,0.06);
+    color: var(--gold-light);
+  }
+
+  .btn-start.verborgen {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.6s ease;
+  }
+
   /* Knop */
   .btn-verder {
     font-family: 'Cinzel', serif;
@@ -238,6 +271,10 @@
     </svg>
   </div>
 
+  <button class="btn-start" id="btnStart" aria-label="Start de ademhaling">
+    Start de ademhaling
+  </button>
+
   <div class="adem-label" id="ademLabel">&nbsp;</div>
 
   <button class="btn-verder" id="btnVerder" aria-label="Naar de vragen">
@@ -247,24 +284,18 @@
 
 <script>
   (function () {
-    // Tijden in milliseconden
-    const SIDE_MS   = 7000;   // duur per zijde (7 seconden)
-    const START_DELAY = 2600; // wacht tot SVG is ingefahren
+    const SIDE_MS = 7000;
 
-    const path  = document.getElementById('sqPath');
-    const label = document.getElementById('ademLabel');
-    const btn   = document.getElementById('btnVerder');
+    const path      = document.getElementById('sqPath');
+    const label     = document.getElementById('ademLabel');
+    const btn       = document.getElementById('btnVerder');
+    const btnStart  = document.getElementById('btnStart');
 
-    const totalLength = path.getTotalLength(); // ~440px (4 x 110)
-
-    // Initieel onzichtbaar
+    const totalLength = path.getTotalLength();
     path.style.strokeDasharray  = totalLength;
     path.style.strokeDashoffset = totalLength;
-
-    // Elke zijde beslaat 1/4 van de totale padlengte
     const sideLength = totalLength / 4;
 
-    // Labels per zijde
     const labels = [
       'Adem in door je neus',
       'Adem uit door je mond \u2013 7 tellen',
@@ -272,24 +303,88 @@
       'Adem uit door je mond \u2013 7 tellen'
     ];
 
-    let animStart  = null;
-    let rafId      = null;
+    // ─── Web Audio ─────────────────────────────────────────────────────────
+
+    let ctx, masterGain, inOsc, inGain, outOsc, outGain;
+
+    function buildAudio() {
+      ctx = new (window.AudioContext || window.webkitAudioContext)();
+
+      // Zeer laag mastervolume — bijna niet aanwezig
+      masterGain = ctx.createGain();
+      masterGain.gain.setValueAtTime(0, ctx.currentTime);
+      masterGain.gain.linearRampToValueAtTime(0.12, ctx.currentTime + 4);
+      masterGain.connect(ctx.destination);
+
+      // ── Inademingstoon: lichte sinus, hoog maar zacht
+      //    E4 (329 Hz) — licht, open, niet opdringerig
+      inGain = ctx.createGain();
+      inGain.gain.setValueAtTime(0, ctx.currentTime);
+      inGain.connect(masterGain);
+
+      inOsc = ctx.createOscillator();
+      inOsc.type = 'sine';
+      inOsc.frequency.setValueAtTime(256, ctx.currentTime);
+      inOsc.connect(inGain);
+      inOsc.start();
+
+      // ── Uitademingstoon: warmere sinus, lager
+      //    A3 (220 Hz) — warm, aards, zacht
+      outGain = ctx.createGain();
+      outGain.gain.setValueAtTime(0, ctx.currentTime);
+      outGain.connect(masterGain);
+
+      outOsc = ctx.createOscillator();
+      outOsc.type = 'sine';
+      outOsc.frequency.setValueAtTime(174, ctx.currentTime);
+      outOsc.connect(outGain);
+      outOsc.start();
+    }
+
+    function onSideChange(side) {
+      if (!ctx) return;
+      const t  = ctx.currentTime;
+      const TR = 3.0; // zachte overgang
+
+      const isIn = (side === 0 || side === 2);
+
+      if (isIn) {
+        // Inademing — lichte toon opent zacht
+        inGain.gain.cancelScheduledValues(t);
+        inGain.gain.linearRampToValueAtTime(0.14, t + TR);
+        outGain.gain.cancelScheduledValues(t);
+        outGain.gain.linearRampToValueAtTime(0, t + TR);
+      } else {
+        // Uitademing — warmere toon zakt langzaam in
+        inGain.gain.cancelScheduledValues(t);
+        inGain.gain.linearRampToValueAtTime(0, t + TR);
+        outGain.gain.cancelScheduledValues(t);
+        outGain.gain.linearRampToValueAtTime(0.14, t + TR);
+      }
+    }
+
+    function fadeOutAudio(duur = 4) {
+      if (!ctx) return;
+      masterGain.gain.cancelScheduledValues(ctx.currentTime);
+      masterGain.gain.linearRampToValueAtTime(0, ctx.currentTime + duur);
+    }
+
+    // ─── Animatieloop ───────────────────────────────────────────────────────
+
+    let animStart   = null;
     let currentSide = -1;
 
     function teken(timestamp) {
       if (!animStart) animStart = timestamp;
       const elapsed = timestamp - animStart;
-
-      // Hoeveel van het pad al getekend (0 → totalLength)
-      const drawn = Math.min((elapsed / (SIDE_MS * 4)) * totalLength, totalLength);
+      const drawn   = Math.min((elapsed / (SIDE_MS * 4)) * totalLength, totalLength);
       path.style.strokeDashoffset = totalLength - drawn;
 
-      // Bepaal welke zijde actief is
       const side = Math.min(Math.floor(drawn / sideLength), 3);
       if (side !== currentSide) {
         currentSide = side;
+        onSideChange(side);
         label.classList.remove('zichtbaar');
-        // Kleine vertraging zodat de fade netjes voelt
         setTimeout(() => {
           label.textContent = labels[side];
           label.classList.add('zichtbaar');
@@ -297,20 +392,24 @@
       }
 
       if (drawn < totalLength) {
-        rafId = requestAnimationFrame(teken);
+        requestAnimationFrame(teken);
       } else {
-        // Animatie klaar
         label.classList.remove('zichtbaar');
+        fadeOutAudio(4);
         setTimeout(() => {
           label.textContent = '';
           btn.classList.add('visible');
-        }, 800);
+        }, 4200);
       }
     }
 
-    setTimeout(() => {
-      rafId = requestAnimationFrame(teken);
-    }, START_DELAY);
+    // ─── Start op klik — alles synchroon ───────────────────────────────────
+
+    btnStart.addEventListener('click', () => {
+      btnStart.classList.add('verborgen');
+      buildAudio();
+      requestAnimationFrame(teken);
+    });
 
     btn.addEventListener('click', () => {
       window.location.href = 'vraag-1.html';
